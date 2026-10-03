@@ -4,16 +4,19 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useMainWallet } from "@/hooks/useMainWallet";
 import { useBurnerWallet } from "@/hooks/useBurnerWallet";
+import { useTradeStats } from "@/hooks/useTradeStats";
 import { pumpFeed, type FeedStatus } from "@/lib/pumpFeed";
 import { WalletPanel } from "@/components/terminal/WalletPanel";
 import { BurnerWalletPanel } from "@/components/terminal/BurnerWalletPanel";
 import { WalletCockpit } from "@/components/terminal/WalletCockpit";
+import { DashboardStats, type StatsMode } from "@/components/terminal/DashboardStats";
 
 export default function TerminalPage() {
   const mainWallet = useMainWallet();
   const burner = useBurnerWallet();
   const [feedStatus, setFeedStatus] = useState<FeedStatus>("idle");
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [modeChoice, setModeChoice] = useState<StatsMode | null>(null);
 
   useEffect(() => {
     const unsub = pumpFeed.onStatus(setFeedStatus);
@@ -31,60 +34,82 @@ export default function TerminalPage() {
   const activeId =
     activeTabId && unlockedWallets.some((w) => w.id === activeTabId) ? activeTabId : (unlockedWallets[0]?.id ?? null);
 
+  // Win/loss figures for every wallet (locked ones included), read from the
+  // database so they also cover trades made by the always-on server bot.
+  const { data: stats, failed: statsFailed, refreshSoon } = useTradeStats(burner.wallets.map((w) => w.publicKey));
+
+  // Until the person picks a view: Live, unless there are only paper trades so far.
+  const mode: StatsMode =
+    modeChoice ?? (stats && stats.totals.live.bought === 0 && stats.totals.paper.bought > 0 ? "paper" : "live");
+
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
-      <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-4">
-          <Link href="/" className="text-lg font-bold tracking-tight text-white">
-            ⚡ Volt<span className="text-violet-400">Snipe</span>
+    <main className="min-h-screen">
+      <header className="topbar">
+        <div className="topbar-inner">
+          <Link href="/" className="brand">
+            <span className="brand-mark">⚡</span>
+            <span>
+              Volt<span className="text-accent">Snipe</span>
+            </span>
           </Link>
-          <span className="rounded-full bg-rose-500/10 px-3 py-1 text-[11px] font-semibold text-rose-400 ring-1 ring-rose-500/30">
-            Real mainnet trading — you can lose all funds you deposit
+          <span className="chip chip-danger text-center">
+            <span className="hidden sm:inline">Real mainnet trading — you can lose all funds you deposit</span>
+            <span className="sm:hidden">Mainnet — real funds</span>
           </span>
         </div>
       </header>
 
-      <div className="mx-auto max-w-7xl px-6 py-6">
+      <div className="page">
         {unlockedWallets.length === 0 && (
-          <div className="mb-6 rounded-xl border border-violet-800/50 bg-violet-950/20 p-4 text-sm text-violet-200">
-            Unlock (or generate) a trading wallet below to load its saved configuration and start sniping. Unlock
-            more than one to run them side by side, each with its own strategy.
+          <div className="notice info mb-4">
+            <span>
+              Unlock (or generate) a trading wallet below to load its saved configuration and start sniping. Unlock
+              more than one to run them side by side, each with its own strategy.
+            </span>
           </div>
         )}
 
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="space-y-4 lg:col-span-1">
+        {burner.wallets.length > 0 && (
+          <DashboardStats
+            totals={stats ? stats.totals[mode] : null}
+            mode={mode}
+            onModeChange={setModeChoice}
+            walletCount={burner.wallets.length}
+            unavailable={statsFailed}
+          />
+        )}
+
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <div className="min-w-0 space-y-4 lg:col-span-1">
             <WalletPanel wallet={mainWallet} />
             <BurnerWalletPanel burner={burner} mainWallet={mainWallet} />
-            <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4 text-[11px] leading-relaxed text-slate-500">
-              <p className="mb-1 font-semibold text-slate-400">How execution works</p>
-              <p>
-                Buys/sells are built by PumpPortal&apos;s public trade-local API, signed locally with each trading
-                wallet&apos;s own key in this browser, and broadcast through our RPC proxy. We never see or store any
-                private key. Every unlocked wallet below trades independently, using only its own saved
-                configuration — one wallet&apos;s settings never affect another&apos;s. Trading pump.fun tokens is
-                extremely high risk — most new tokens lose most of their value.
-              </p>
+            <div className="panel">
+              <div className="panel-body text-[11px] leading-relaxed text-ink-mute">
+                <p className="mb-1 font-semibold text-ink-dim">How execution works</p>
+                <p>
+                  Buys/sells are built by PumpPortal&apos;s public trade-local API, signed locally with each trading
+                  wallet&apos;s own key in this browser, and broadcast through our RPC proxy. We never see or store any
+                  private key. Every unlocked wallet below trades independently, using only its own saved
+                  configuration — one wallet&apos;s settings never affect another&apos;s. Trading pump.fun tokens is
+                  extremely high risk — most new tokens lose most of their value.
+                </p>
+              </div>
             </div>
           </div>
 
-          <div className="space-y-4 lg:col-span-2">
+          <div className="min-w-0 space-y-4 lg:col-span-2">
             {unlockedWallets.length > 1 && (
-              <div className="flex flex-wrap gap-1.5 rounded-xl border border-slate-800 bg-slate-900/60 p-2">
+              <div className="tabs">
                 {unlockedWallets.map((w) => (
                   <button
                     key={w.id}
                     onClick={() => setActiveTabId(w.id)}
-                    className={`rounded-lg px-3 py-1.5 text-xs font-semibold ${
-                      w.id === activeId
-                        ? "bg-violet-600 text-white"
-                        : "text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-                    }`}
+                    className={`tab ${w.id === activeId ? "active" : ""}`}
                   >
                     {w.label}
                   </button>
                 ))}
-                <span className="ml-auto self-center pr-2 text-[11px] text-slate-500">
+                <span className="ml-auto self-center pr-2 text-[11px] text-ink-mute">
                   All {unlockedWallets.length} keep trading in the background regardless of which tab is open
                 </span>
               </div>
@@ -102,6 +127,9 @@ export default function TerminalPage() {
                 refreshBurnerBalance={() => burner.refreshBalance(w.id)}
                 feedStatus={feedStatus}
                 visible={w.id === activeId}
+                stats={stats?.wallets[w.publicKey]?.[mode] ?? null}
+                statsMode={mode}
+                onTradeActivity={refreshSoon}
               />
             ))}
           </div>
@@ -109,4 +137,4 @@ export default function TerminalPage() {
       </div>
     </main>
   );
-                }
+}
