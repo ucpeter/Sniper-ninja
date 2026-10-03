@@ -46,6 +46,19 @@ Works the same regardless of where you host the app.
 Run this once against any new database, and again any time `src/db/schema.ts`
 changes.
 
+### Upgrading an existing database (partial sells and trading limits)
+
+This update adds columns to `positions` and `bot_configs`: partial-sell
+tracking, and one JSON column for the new settings. Every new column is
+nullable or has a default, so existing rows, positions and trade history are
+untouched.
+
+**Run the push command above against your existing database _before_ you deploy
+the new code.** The app reads those columns, so the new code fails on a
+database that does not have them yet. Run it from any machine that can reach
+the database (on Render, use the database's *External Database URL*). Running
+it again later is harmless.
+
 ## 4. Deploy to Vercel
 
 1. Push this repo to GitHub.
