@@ -2,6 +2,7 @@ import { db } from "@/db";
 import { botConfigs } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { DEFAULT_BOT_CONFIG } from "@/lib/types";
+import { normalizeAdvanced } from "@/lib/strategy";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,7 @@ function toNumberConfig(row: typeof botConfigs.$inferSelect) {
     honeypotDetection: row.honeypotDetection,
     rugProtection: row.rugProtection,
     paperTrading: row.paperTrading,
+    advanced: normalizeAdvanced(row.advanced),
     isRunning: row.isRunning,
   };
 }
@@ -81,6 +83,9 @@ export async function POST(req: Request) {
     honeypotDetection: Boolean(body.honeypotDetection ?? DEFAULT_BOT_CONFIG.honeypotDetection),
     rugProtection: Boolean(body.rugProtection ?? DEFAULT_BOT_CONFIG.rugProtection),
     paperTrading: Boolean(body.paperTrading ?? DEFAULT_BOT_CONFIG.paperTrading),
+    // Only written when the client sent it, so an older page that does not know
+    // about these settings can never wipe them by saving.
+    ...(body.advanced !== undefined ? { advanced: normalizeAdvanced(body.advanced) } : {}),
     isRunning: Boolean(body.isRunning ?? false),
     updatedAt: new Date(),
   };
