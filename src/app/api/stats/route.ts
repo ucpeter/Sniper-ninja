@@ -1,4 +1,4 @@
-importimport { db } from "@/db";
+import { db } from "@/db";
 import { positions } from "@/db/schema";
 import { inArray, sql } from "drizzle-orm";
 import { addStats, emptyStats, type ModeStats, type StatsPayload } from "@/lib/stats";
@@ -69,4 +69,4 @@ export async function GET(req: Request) {
     console.error("[api/stats] failed", err);
     return Response.json({ error: "Could not load stats" }, { status: 500 });
   }
-}￼Enter
+}
