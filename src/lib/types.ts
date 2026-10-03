@@ -1,6 +1,7 @@
 // Shared types used by the client engine, hooks and API routes.
+import { DEFAULT_ADVANCED, type AdvancedConfig, type ExitPlan } from "./strategy";
 
-export type PositionSizeMode = "fixed" | "random" | "risk_scaled";
+export type PositionSizeMode = "fixed" | "random" | "risk_scaled" | "percent";
 export type RiskTolerance = "low" | "medium" | "high";
 export type PoolChoice = "pump" | "raydium" | "auto";
 
@@ -31,6 +32,9 @@ export interface BotConfig {
   rugProtection: boolean;
   paperTrading: boolean;
 
+  /** Partial sells, break-even, daily limits, extra filters and percent sizing. All off by default. */
+  advanced: AdvancedConfig;
+
   isRunning: boolean;
 }
 
@@ -55,6 +59,7 @@ export const DEFAULT_BOT_CONFIG: Omit<BotConfig, "walletAddress"> = {
   honeypotDetection: true,
   rugProtection: true,
   paperTrading: false,
+  advanced: DEFAULT_ADVANCED,
   isRunning: false,
 };
 
@@ -140,6 +145,12 @@ export interface Position {
   exitPriceSol: number | null;
   realizedPnlSol: number | null;
   realizedPnlPct: number | null;
+  // Partial sells: null / 0 until the first partial sell happens.
+  remainingTokenAmount: number | null;
+  proceedsSoFarSol: number | null;
+  partialStepsDone: number;
+  /** Exit rules frozen when the position was opened; null = classic rules only. */
+  exitPlan: ExitPlan | null;
   openedAt: string;
   closedAt: string | null;
   // client-side live tracking (not persisted)

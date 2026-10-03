@@ -8,10 +8,34 @@ import { buildTrade } from "./tradeBuilder";
 import { prepareForFastLane, broadcastSigned, readFastLaneConfig } from "./fastSend";
 import { assessTokenRisk } from "./riskCheck";
 import { base64ToBytes, pollForConfirmation } from "./txUtils";
+import { loadDayLedger } from "./dayLedger";
+import {
+  authorityGate,
+  buildExitPlan,
+  copycatReason,
+  duePartial,
+  emptyLedger,
+  entryGate,
+  exposureGate,
+  exposureOf,
+  gainPct,
+  ledgerOnBuyFailed,
+  ledgerOnBuyStart,
+  ledgerOnClose,
+  needsRiskLookup,
+  normalizeAdvanced,
+  sizeByPercent,
+  stopFloorPct,
+  type DayLedger,
+  type ExitPlan,
+  type ExitState,
+} from "./strategy";
 import { PUMP_FUN_TOTAL_SUPPLY, type BotConfig, type PumpPortalNewTokenEvent, type PumpPortalTradeEvent } from "./types";
 
 const RISK_THRESHOLD: Record<BotConfig["riskTolerance"], number> = { low: 70, medium: 50, high: 30 };
 const FEE_BUFFER_SOL = 0.006; // same buffer the browser engine uses before attempting a buy
+// After a partial sell fails, wait this long before trying the same step again.
+const PARTIAL_RETRY_MS = 15_000;
 
 // This engine exists specifically so a wallet keeps trading with zero
 // browser tabs open. Everything it needs — the keypair, the config, open
@@ -47,6 +71,14 @@ interface OpenPosition {
   trailingStopPct: number;
   maxHoldTimeSec: number;
   openedAtMs: number;
+  // Partial sells: tokens still held (null until the first partial sell), SOL banked
+  // so far, steps done, and the exit plan frozen when the position opened.
+  remainingTokenAmount: number | null;
+  proceedsSoFarSol: number;
+  partialStepsDone: number;
+  exitPlan: ExitPlan | null;
+  partialRetryAtMs: number;
+  peakSaved: boolean;
 }
 
 interface RunningBot {
@@ -55,6 +87,11 @@ interface RunningBot {
   config: BotConfig;
   openPositions: Map<string, OpenPosition>; // keyed by mint
   inFlight: Set<string>;
+  /** Today's counters for the daily limits. */
+  ledger: DayLedger;
+  /** SOL committed to buys that are still in flight, so they count toward the exposure cap. */
+  pendingExposureSol: number;
+  lastGateNote: { reason: string; atMs: number } | null;
   unsubscribeFeed: () => void;
   timeoutWatchdog: ReturnType<typeof setInterval>;
   configRefresh: ReturnType<typeof setInterval>;
@@ -134,6 +171,7 @@ async function loadConfig(walletAddress: string): Promise<BotConfig> {
     honeypotDetection: row.honeypotDetection,
     rugProtection: row.rugProtection,
     paperTrading: row.paperTrading,
+    advanced: normalizeAdvanced(row.advanced),
   } as BotConfig;
 }
 
@@ -157,6 +195,12 @@ async function loadOpenPositions(walletAddress: string): Promise<Map<string, Ope
       trailingStopPct: Number(r.trailingStopPct),
       maxHoldTimeSec: r.maxHoldTimeSec,
       openedAtMs: new Date(r.openedAt).getTime(),
+      remainingTokenAmount: r.remainingTokenAmount === null ? null : Number(r.remainingTokenAmount),
+      proceedsSoFarSol: Number(r.proceedsSoFarSol ?? 0),
+      partialStepsDone: r.partialStepsDone,
+      exitPlan: r.exitPlan ?? null,
+      partialRetryAtMs: 0,
+      peakSaved: false,
     });
   }
   return map;
@@ -184,7 +228,7 @@ async function signAndSend(bot: RunningBot, unsignedTxBase64: string): Promise<s
   return broadcastSigned(connection, prepared, fastLaneCfg);
 }
 
-async function executeBuy(bot: RunningBot, evt: PumpPortalNewTokenEvent, amountSol: number, riskScore: number | null) {
+async function executeBuy(bot: RunningBot, evt: PumpPortalNewTokenEvent, amountSol: number, riskScore: number | null): Promise<boolean> {
   bot.inFlight.add(evt.mint);
   try {
     const unsignedTx = await buildTrade({
@@ -219,7 +263,7 @@ async function executeBuy(bot: RunningBot, evt: PumpPortalNewTokenEvent, amountS
         paperTrading: bot.config.paperTrading,
         errorMessage: error ?? "Buy did not confirm on-chain",
       });
-      return;
+      return false;
     }
 
     const entryPriceSol = evt.vSolInBondingCurve / evt.vTokensInBondingCurve;
@@ -242,6 +286,7 @@ async function executeBuy(bot: RunningBot, evt: PumpPortalNewTokenEvent, amountS
         maxHoldTimeSec: bot.config.maxHoldTimeSec,
         riskScore,
         paperTrading: bot.config.paperTrading,
+        exitPlan: buildExitPlan(bot.config.advanced),
         status: "open",
         buyTxSignature: signature,
       })
@@ -260,6 +305,12 @@ async function executeBuy(bot: RunningBot, evt: PumpPortalNewTokenEvent, amountS
       trailingStopPct: bot.config.trailingStopPct,
       maxHoldTimeSec: bot.config.maxHoldTimeSec,
       openedAtMs: Date.now(),
+      remainingTokenAmount: null,
+      proceedsSoFarSol: 0,
+      partialStepsDone: 0,
+      exitPlan: buildExitPlan(bot.config.advanced),
+      partialRetryAtMs: 0,
+      peakSaved: false,
     });
 
     await db.insert(trades).values({
@@ -280,6 +331,7 @@ async function executeBuy(bot: RunningBot, evt: PumpPortalNewTokenEvent, amountS
     console.log(
       `${tag(bot.walletAddress)} BOUGHT ${evt.symbol} (${evt.mint.slice(0, 8)}…) — ${amountSol.toFixed(4)} SOL, risk ${riskScore ?? "n/a"}, tx ${signature.slice(0, 12)}…`,
     );
+    return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : "Buy failed";
     console.error(`${tag(bot.walletAddress)} BUY FAILED for ${evt.symbol}: ${message}`);
@@ -295,6 +347,7 @@ async function executeBuy(bot: RunningBot, evt: PumpPortalNewTokenEvent, amountS
       paperTrading: bot.config.paperTrading,
       errorMessage: message,
     });
+    return false;
   } finally {
     bot.inFlight.delete(evt.mint);
   }
@@ -304,16 +357,26 @@ async function executeSell(
   bot: RunningBot,
   position: OpenPosition,
   currentPriceSol: number,
-  reason: "take_profit" | "stop_loss" | "trailing_stop" | "timeout",
+  reason: "take_profit" | "stop_loss" | "break_even_stop" | "trailing_stop" | "timeout" | "partial_sell",
+  partial?: { fraction: number; newStepsDone: number },
 ) {
   bot.inFlight.add(position.mint);
-  bot.openPositions.delete(position.mint);
+  // A partial sell leaves the position in the map. A full sell takes it out (and
+  // puts it back if the sell fails), exactly as before.
+  if (!partial) bot.openPositions.delete(position.mint);
+  // Tokens still held, and what this sell takes off them. A partial sell is sent as a
+  // whole percent of the wallet's balance of that token, and the books use that share.
+  const held = position.remainingTokenAmount ?? position.tokenAmount;
+  const sentPct = partial ? Math.min(99, Math.max(1, Math.round(partial.fraction * 100))) : 100;
+  const soldTokens = partial ? held * (sentPct / 100) : held;
   try {
     const unsignedTx = await buildTrade({
       publicKey: bot.keypair.publicKey.toString(),
       action: "sell",
       mint: position.mint,
-      amount: position.tokenAmount,
+      // Unchanged for a normal position (exact token count). Once part of it has
+      // been sold, the old count is out of date, so sell "everything left" instead.
+      amount: partial ? `${sentPct}%` : position.partialStepsDone > 0 ? "100%" : position.tokenAmount,
       denominatedInSol: false,
       slippage: bot.config.slippagePct,
       priorityFee: bot.config.priorityFeeSol,
@@ -323,9 +386,10 @@ async function executeSell(
     const { confirmed, error } = await pollForConfirmation(getServerConnection(), signature);
 
     if (!confirmed) {
-      // Not actually sold — put it back so it keeps being watched, and
-      // record what really happened instead of a fabricated "confirmed".
-      bot.openPositions.set(position.mint, position);
+      // Not actually sold — keep it watched, and record what really happened
+      // instead of a fabricated "confirmed".
+      if (partial) position.partialRetryAtMs = Date.now() + PARTIAL_RETRY_MS;
+      else bot.openPositions.set(position.mint, position);
       console.error(`${tag(bot.walletAddress)} SELL FAILED for ${position.symbol}: ${error}`);
       await db.insert(trades).values({
         walletAddress: bot.walletAddress,
@@ -334,7 +398,7 @@ async function executeSell(
         symbol: position.symbol,
         side: "sell",
         amountSol: "0",
-        tokenAmount: String(position.tokenAmount),
+        tokenAmount: String(soldTokens),
         priceSol: String(currentPriceSol),
         txSignature: signature,
         status: "failed",
@@ -344,8 +408,44 @@ async function executeSell(
       return;
     }
 
-    const exitSol = position.tokenAmount * currentPriceSol;
-    const realizedPnlSol = exitSol - position.entryAmountSol;
+    const exitSol = soldTokens * currentPriceSol;
+
+    if (partial) {
+      const remaining = held - soldTokens;
+      const banked = position.proceedsSoFarSol + exitSol;
+      await db
+        .update(positions)
+        .set({
+          remainingTokenAmount: String(remaining),
+          proceedsSoFarSol: String(banked),
+          partialStepsDone: partial.newStepsDone,
+        })
+        .where(eq(positions.id, position.id));
+      await db.insert(trades).values({
+        walletAddress: bot.walletAddress,
+        positionId: position.id,
+        mint: position.mint,
+        symbol: position.symbol,
+        side: "sell",
+        amountSol: String(exitSol),
+        tokenAmount: String(soldTokens),
+        priceSol: String(currentPriceSol),
+        txSignature: signature,
+        status: "confirmed",
+        paperTrading: bot.config.paperTrading,
+      });
+      position.remainingTokenAmount = remaining;
+      position.proceedsSoFarSol = banked;
+      position.partialStepsDone = partial.newStepsDone;
+      console.log(
+        `${tag(bot.walletAddress)} PARTIAL SELL ${position.symbol} — ${sentPct}% of what was left, ${exitSol.toFixed(4)} SOL back (${banked.toFixed(4)} banked of ${position.entryAmountSol.toFixed(4)} spent), tx ${signature.slice(0, 12)}…`,
+      );
+      return;
+    }
+
+    // Profit of the whole position: everything banked by earlier partial sells plus
+    // this sell, minus what was spent. With no partial sell this is exitSol - entry, as before.
+    const realizedPnlSol = position.proceedsSoFarSol + exitSol - position.entryAmountSol;
     const realizedPnlPct = (realizedPnlSol / position.entryAmountSol) * 100;
 
     await db
@@ -368,20 +468,22 @@ async function executeSell(
       symbol: position.symbol,
       side: "sell",
       amountSol: String(exitSol),
-      tokenAmount: String(position.tokenAmount),
+      tokenAmount: String(soldTokens),
       priceSol: String(currentPriceSol),
       txSignature: signature,
       status: "confirmed",
       paperTrading: bot.config.paperTrading,
     });
+    bot.ledger = ledgerOnClose(bot.ledger, realizedPnlSol, Date.now());
     console.log(
       `${tag(bot.walletAddress)} SOLD ${position.symbol} (${reason}) — PnL ${realizedPnlSol.toFixed(4)} SOL (${realizedPnlPct.toFixed(1)}%), tx ${signature.slice(0, 12)}…`,
     );
   } catch (err) {
     console.error(`${tag(bot.walletAddress)} SELL FAILED for ${position.symbol}: ${err instanceof Error ? err.message : "Sell failed"}`);
-    // Put the position back — the sell attempt failed, so it's still open
-    // and should keep being watched rather than silently disappearing.
-    bot.openPositions.set(position.mint, position);
+    // The sell attempt failed, so it is still open and should keep being watched
+    // rather than silently disappearing.
+    if (partial) position.partialRetryAtMs = Date.now() + PARTIAL_RETRY_MS;
+    else bot.openPositions.set(position.mint, position);
     await db.insert(trades).values({
       walletAddress: bot.walletAddress,
       positionId: position.id,
@@ -389,7 +491,7 @@ async function executeSell(
       symbol: position.symbol,
       side: "sell",
       amountSol: "0",
-      tokenAmount: String(position.tokenAmount),
+      tokenAmount: String(soldTokens),
       priceSol: String(currentPriceSol),
       status: "failed",
       paperTrading: bot.config.paperTrading,
@@ -400,10 +502,24 @@ async function executeSell(
   }
 }
 
+/** Logs why the bot is not buying, at most once a minute per reason, so a full day of blocked tokens does not flood the log. */
+function noteGate(bot: RunningBot, reason: string) {
+  const now = Date.now();
+  if (bot.lastGateNote && bot.lastGateNote.reason === reason && now - bot.lastGateNote.atMs < 60_000) return;
+  bot.lastGateNote = { reason, atMs: now };
+  console.log(`${tag(bot.walletAddress)} not buying — ${reason}`);
+}
+
 async function evaluateNewToken(bot: RunningBot, evt: PumpPortalNewTokenEvent) {
   const cfg = bot.config;
   if (bot.inFlight.has(evt.mint) || bot.openPositions.has(evt.mint)) return;
   if (bot.openPositions.size >= cfg.maxPositions) return;
+  const adv = normalizeAdvanced(cfg.advanced);
+  const earlyGate = entryGate(adv, bot.ledger, Date.now());
+  if (!earlyGate.ok) {
+    noteGate(bot, earlyGate.reason);
+    return;
+  }
 
   const devHoldPct = (evt.initialBuy / PUMP_FUN_TOTAL_SUPPLY) * 100;
   const solPriceUsd = await getSolPriceUsd();
@@ -412,12 +528,15 @@ async function evaluateNewToken(bot: RunningBot, evt: PumpPortalNewTokenEvent) {
   if (liquidityUsd < cfg.minLiquidityUsd) return;
   if (cfg.maxLiquidityUsd > 0 && liquidityUsd > cfg.maxLiquidityUsd) return;
   if (devHoldPct > cfg.maxDevHoldPct) return;
+  if (adv.blockCopycatNames && copycatReason(evt.name, evt.symbol)) return;
 
   let riskScore: number | null = null;
-  if (cfg.honeypotDetection || cfg.rugProtection) {
+  let assessment: Awaited<ReturnType<typeof assessTokenRisk>> | null = null;
+  const scoreChecks = cfg.honeypotDetection || cfg.rugProtection;
+  if (scoreChecks || needsRiskLookup(adv)) {
     const blacklisted = cfg.useBlacklist ? await isBlacklisted(bot.walletAddress, evt.traderPublicKey) : false;
     try {
-      const assessment = await assessTokenRisk({
+      assessment = await assessTokenRisk({
         mint: evt.mint,
         devHoldPct,
         liquidityUsd,
@@ -427,8 +546,8 @@ async function evaluateNewToken(bot: RunningBot, evt: PumpPortalNewTokenEvent) {
         blacklisted,
       });
       riskScore = assessment.score;
-      const threshold = RISK_THRESHOLD[cfg.riskTolerance];
-      if (assessment.score < threshold) return;
+      // A lookup made only for the authority filters must not switch the score check on.
+      if (scoreChecks && assessment.score < RISK_THRESHOLD[cfg.riskTolerance]) return;
     } catch {
       // Same as the browser engine: a risk-check failure isn't treated as
       // an automatic pass or automatic fail here — it just skips this one
@@ -437,24 +556,64 @@ async function evaluateNewToken(bot: RunningBot, evt: PumpPortalNewTokenEvent) {
     }
   }
 
-  const amountSol = Math.min(cfg.maxAmountSol, Math.max(cfg.minAmountSol, sizeForRisk(cfg, riskScore ?? 60)));
+  if (!authorityGate(adv, assessment).ok) return;
 
+  // Balance first: percent sizing needs it, and the buy needs the check anyway.
   // Same pre-check the browser engine does before ever attempting a buy —
   // this is the piece that was missing here, which is what let the engine
   // "buy" tokens with no real SOL to buy them with.
+  let balanceSol: number;
   try {
     const lamports = await getServerConnection().getBalance(bot.keypair.publicKey);
-    const balanceSol = lamports / 1e9;
-    if (balanceSol < amountSol + FEE_BUFFER_SOL) {
-      console.log(`${tag(bot.walletAddress)} skip buy — balance too low (${balanceSol.toFixed(4)} SOL)`);
-      return;
-    }
+    balanceSol = lamports / 1e9;
   } catch {
     // Can't verify balance right now — safer to skip this one than buy blind.
     return;
   }
 
-  await executeBuy(bot, evt, amountSol, riskScore);
+  let amountSol: number;
+  if (cfg.positionSizeMode === "percent") {
+    const sized = sizeByPercent(balanceSol, adv.positionSizePercent, cfg.minAmountSol, cfg.maxAmountSol);
+    if (!sized.ok) {
+      noteGate(bot, sized.reason);
+      return;
+    }
+    amountSol = sized.amountSol;
+  } else {
+    amountSol = Math.min(cfg.maxAmountSol, Math.max(cfg.minAmountSol, sizeForRisk(cfg, riskScore ?? 60)));
+  }
+
+  if (balanceSol < amountSol + FEE_BUFFER_SOL) {
+    console.log(`${tag(bot.walletAddress)} skip buy — balance too low (${balanceSol.toFixed(4)} SOL)`);
+    return;
+  }
+
+  // The final limit checks and the daily counters are updated in one synchronous step
+  // (no await in between), so two tokens passing at the same moment cannot both slip
+  // past a limit.
+  const nowMs = Date.now();
+  const finalGate = entryGate(adv, bot.ledger, nowMs);
+  if (!finalGate.ok) {
+    noteGate(bot, finalGate.reason);
+    return;
+  }
+  let openExposure = bot.pendingExposureSol;
+  for (const p of bot.openPositions.values()) {
+    openExposure += exposureOf(p.entryAmountSol, p.tokenAmount, p.remainingTokenAmount);
+  }
+  const exposure = exposureGate(adv, openExposure, amountSol);
+  if (!exposure.ok) {
+    noteGate(bot, exposure.reason);
+    return;
+  }
+  bot.ledger = ledgerOnBuyStart(bot.ledger, nowMs);
+  bot.pendingExposureSol += amountSol;
+  try {
+    const opened = await executeBuy(bot, evt, amountSol, riskScore);
+    if (!opened) bot.ledger = ledgerOnBuyFailed(bot.ledger);
+  } finally {
+    bot.pendingExposureSol = Math.max(0, bot.pendingExposureSol - amountSol);
+  }
 }
 
 async function checkExitConditions(bot: RunningBot, mint: string, currentPriceSol: number) {
@@ -464,13 +623,44 @@ async function checkExitConditions(bot: RunningBot, mint: string, currentPriceSo
   position.highWaterMarkPriceSol = Math.max(position.highWaterMarkPriceSol, currentPriceSol);
   const pnlPct = ((currentPriceSol - position.entryPriceSol) / position.entryPriceSol) * 100;
   const drawdownFromHwm = ((position.highWaterMarkPriceSol - currentPriceSol) / position.highWaterMarkPriceSol) * 100;
+  const exitState: ExitState = {
+    entryPriceSol: position.entryPriceSol,
+    highWaterMarkPriceSol: position.highWaterMarkPriceSol,
+    stopLossPct: position.stopLossPct,
+    plan: position.exitPlan,
+    partialStepsDone: position.partialStepsDone,
+  };
+  // Normally -stopLoss%. Raised to the entry level once a partial sell happened or
+  // the break-even trigger was reached. Positions with no plan are unchanged.
+  const stopFloor = stopFloorPct(exitState);
+
+  // Save the peak once it first arms the break-even stop, so a restart keeps that protection.
+  const armPct = position.exitPlan?.breakEvenTriggerPct ?? 0;
+  if (armPct > 0 && !position.peakSaved && gainPct(position.entryPriceSol, position.highWaterMarkPriceSol) >= armPct - 1e-9) {
+    position.peakSaved = true;
+    void (async () => {
+      try {
+        await db
+          .update(positions)
+          .set({ highWaterMarkPriceSol: String(position.highWaterMarkPriceSol) })
+          .where(eq(positions.id, position.id));
+      } catch {
+        // best effort
+      }
+    })();
+  }
 
   if (pnlPct >= position.takeProfitPct) {
     await executeSell(bot, position, currentPriceSol, "take_profit");
-  } else if (pnlPct <= -position.stopLossPct) {
-    await executeSell(bot, position, currentPriceSol, "stop_loss");
+  } else if (pnlPct <= stopFloor) {
+    await executeSell(bot, position, currentPriceSol, stopFloor > -Math.abs(position.stopLossPct) ? "break_even_stop" : "stop_loss");
   } else if (position.trailingStopPct > 0 && pnlPct > 0 && drawdownFromHwm >= position.trailingStopPct) {
     await executeSell(bot, position, currentPriceSol, "trailing_stop");
+  } else {
+    const due = duePartial(exitState, currentPriceSol);
+    if (due && Date.now() >= position.partialRetryAtMs) {
+      await executeSell(bot, position, currentPriceSol, "partial_sell", due);
+    }
   }
 }
 
@@ -496,6 +686,14 @@ export async function startPersistentBot(walletAddress: string, keypair: Keypair
 
   const config = await loadConfig(walletAddress);
   const openPositions = await loadOpenPositions(walletAddress);
+  // Today's counters for the daily limits. Always loaded here (it is one database
+  // read), so a limit switched on later while the bot runs still sees earlier trades.
+  let ledger = emptyLedger(Date.now());
+  try {
+    ledger = await loadDayLedger(walletAddress, config.paperTrading);
+  } catch (err) {
+    console.error(`${tag(walletAddress)} could not load today's trade counters, daily limits start from zero: ${err instanceof Error ? err.message : err}`);
+  }
 
   const feed = getServerFeed();
   feed.connect();
@@ -507,6 +705,9 @@ export async function startPersistentBot(walletAddress: string, keypair: Keypair
     config,
     openPositions,
     inFlight: new Set(),
+    ledger,
+    pendingExposureSol: 0,
+    lastGateNote: null,
     unsubscribeFeed: () => {},
     timeoutWatchdog: setInterval(() => {
       checkTimeouts(bot).catch(() => {});
