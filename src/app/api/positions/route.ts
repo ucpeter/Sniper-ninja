@@ -1,6 +1,7 @@
 import { db } from "@/db";
 import { positions } from "@/db/schema";
 import { and, desc, eq } from "drizzle-orm";
+import { normalizeExitPlan } from "@/lib/strategy";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,10 @@ function toClient(row: typeof positions.$inferSelect) {
     exitPriceSol: row.exitPriceSol ? Number(row.exitPriceSol) : null,
     realizedPnlSol: row.realizedPnlSol ? Number(row.realizedPnlSol) : null,
     realizedPnlPct: row.realizedPnlPct ? Number(row.realizedPnlPct) : null,
+    remainingTokenAmount: row.remainingTokenAmount === null ? null : Number(row.remainingTokenAmount),
+    proceedsSoFarSol: row.proceedsSoFarSol === null ? null : Number(row.proceedsSoFarSol),
+    partialStepsDone: row.partialStepsDone,
+    exitPlan: row.exitPlan ?? null,
     openedAt: row.openedAt.toISOString(),
     closedAt: row.closedAt ? row.closedAt.toISOString() : null,
   };
@@ -80,6 +85,7 @@ export async function POST(req: Request) {
       maxHoldTimeSec: Number(body.maxHoldTimeSec ?? 300),
       riskScore: body.riskScore ?? null,
       paperTrading: Boolean(body.paperTrading ?? false),
+      exitPlan: normalizeExitPlan(body.exitPlan),
       buyTxSignature: body.buyTxSignature ?? null,
       status: "open",
     })
