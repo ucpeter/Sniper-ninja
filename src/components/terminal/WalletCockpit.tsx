@@ -12,6 +12,8 @@ import { LiveFeedTable } from "@/components/terminal/LiveFeedTable";
 import { PositionsTable } from "@/components/terminal/PositionsTable";
 import { HistoryTable } from "@/components/terminal/HistoryTable";
 import { StatsBar } from "@/components/terminal/StatsBar";
+import type { StatsMode } from "@/components/terminal/DashboardStats";
+import type { TradeStats } from "@/lib/stats";
 import { LogPanel } from "@/components/terminal/LogPanel";
 import { BlacklistPanel } from "@/components/terminal/BlacklistPanel";
 
@@ -36,6 +38,9 @@ export function WalletCockpit({
   refreshBurnerBalance,
   feedStatus,
   visible,
+  stats,
+  statsMode,
+  onTradeActivity,
 }: {
   wallet: BurnerWalletSummary;
   keypair: Keypair;
@@ -43,6 +48,11 @@ export function WalletCockpit({
   refreshBurnerBalance: () => Promise<void> | void;
   feedStatus: FeedStatus;
   visible: boolean;
+  /** This wallet's win/loss figures (from /api/stats) for the selected Live/Paper view, or null while loading. */
+  stats: TradeStats | null;
+  statsMode: StatsMode;
+  /** Tell the page to refresh the win/loss figures soon — called when this wallet's trades or positions change. */
+  onTradeActivity: () => void;
 }) {
   const [config, setConfig] = useState<BotConfig | null>(null);
   const [saving, setSaving] = useState(false);
@@ -54,6 +64,12 @@ export function WalletCockpit({
     burnerBalanceSol,
     refreshBurnerBalance,
   });
+
+  // Refresh the win/loss cards shortly after any buy or sell.
+  const tradeActivity = `${engine.history.length}:${engine.positions.length}`;
+  useEffect(() => {
+    onTradeActivity();
+  }, [tradeActivity, onTradeActivity]);
 
   useEffect(() => {
     let cancelled = false;
@@ -106,15 +122,11 @@ export function WalletCockpit({
         />
       )}
 
-      <StatsBar
-        history={engine.history}
-        openCount={engine.positions.filter((p) => p.status === "open").length}
-        solPriceUsd={engine.solPriceUsd}
-      />
+      <StatsBar walletLabel={wallet.label} stats={stats} mode={statsMode} />
 
       <LiveFeedTable tokens={engine.scanned} feedStatus={feedStatus} />
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <PositionsTable positions={engine.positions} onSell={engine.manualSell} />
         <LogPanel logs={engine.logs} />
       </div>

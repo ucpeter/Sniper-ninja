@@ -1,42 +1,53 @@
-import { fmtPct, fmtSol } from "@/lib/format";
-import type { TradeRecord } from "@/lib/types";
+"use client";
 
-export function StatsBar({ history, openCount, solPriceUsd }: { history: TradeRecord[]; openCount: number; solPriceUsd: number }) {
-  const sells = history.filter((t) => t.side === "sell" && t.status === "confirmed");
-  const totalTrades = sells.length;
-  const wins = sells.filter((t) => {
-    const buy = history.find((b) => b.positionId === t.positionId && b.side === "buy");
-    return buy ? t.priceSol > buy.priceSol : false;
-  }).length;
-  const winRate = totalTrades > 0 ? (wins / totalTrades) * 100 : 0;
+import { emptyStats, type TradeStats } from "@/lib/stats";
+import { StatCard } from "./StatCard";
+import { fmtWinRate, signTone, type StatsMode } from "./DashboardStats";
 
-  const realizedSol = sells.reduce((sum, sell) => {
-    const buy = history.find((b) => b.positionId === sell.positionId && b.side === "buy");
-    if (!buy) return sum;
-    return sum + (sell.amountSol - buy.amountSol);
-  }, 0);
-
-  const items = [
-    { label: "Open positions", value: String(openCount) },
-    { label: "Closed trades", value: String(totalTrades) },
-    { label: "Win rate", value: totalTrades > 0 ? `${winRate.toFixed(0)}%` : "—" },
-    { label: "Realized PnL", value: fmtSol(realizedSol), sub: `≈ ${fmtPct((realizedSol * solPriceUsd) / 1)}`, positive: realizedSol >= 0 },
-  ];
+/**
+ * Results for one trading wallet. The numbers come from the same /api/stats
+ * read as the all-wallet cards at the top, so the two always add up.
+ */
+export function StatsBar({
+  walletLabel,
+  stats,
+  mode,
+}: {
+  walletLabel: string;
+  stats: TradeStats | null;
+  mode: StatsMode;
+}) {
+  const s = stats ?? emptyStats();
+  const num = (n: number) => (stats ? n : "—");
 
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-      {items.map((item) => (
-        <div key={item.label} className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-          <p className="text-xs uppercase tracking-wide text-slate-500">{item.label}</p>
-          <p
-            className={`mt-1 text-xl font-semibold ${
-              "positive" in item ? (item.positive ? "text-emerald-400" : "text-rose-400") : "text-white"
-            }`}
-          >
-            {item.value}
-          </p>
+    <section aria-label={`${walletLabel} results`}>
+      <div className="board-head">
+        <div>
+          <div className="board-title">This wallet — {walletLabel}</div>
+          <div className="board-sub">Closed trades only. Follows the Live / Paper switch at the top.</div>
         </div>
-      ))}
-    </div>
+        <span className={`chip ${mode === "paper" ? "chip-warn" : "chip-danger"}`}>
+          {mode === "paper" ? "Paper trades" : "Live trades"}
+        </span>
+      </div>
+      <div className="stats stats-6">
+        <StatCard label="Tokens bought" value={num(s.bought)} tone="blue" sub="all time" />
+        <StatCard label="In wallet" value={num(s.open)} tone="amber" sub="open positions" />
+        <StatCard label="Wins" value={num(s.wins)} tone="accent" sub="closed in profit" />
+        <StatCard label="Losses" value={num(s.losses)} tone="red" sub="closed at a loss" />
+        <StatCard
+          label="Win rate"
+          value={stats ? fmtWinRate(s) : "—"}
+          sub={stats && s.closed > 0 ? `${s.closed} closed` : "no closed trades yet"}
+        />
+        <StatCard
+          label="Realised P&L"
+          sol={stats ? s.profitSol : null}
+          signed
+          tone={signTone(s.profitSol)}
+        />
+      </div>
+    </section>
   );
 }

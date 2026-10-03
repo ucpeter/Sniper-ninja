@@ -2,61 +2,52 @@
 
 import { useState } from "react";
 import type { useMainWallet } from "@/hooks/useMainWallet";
-import { fmtSol, shortAddr } from "@/lib/format";
+import { shortAddr } from "@/lib/format";
+import { SolAmount } from "@/components/SolAmount";
 
 export function WalletPanel({ wallet }: { wallet: ReturnType<typeof useMainWallet> }) {
   const [showOptions, setShowOptions] = useState(false);
 
   if (wallet.publicKey) {
     return (
-      <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-        <div>
-          <p className="text-xs uppercase tracking-wide text-slate-500">Main wallet ({wallet.kind})</p>
-          <p className="font-mono text-sm text-white">{shortAddr(wallet.publicKey, 6)}</p>
-          <p className="text-xs text-slate-500">{fmtSol(wallet.balanceSol)}</p>
+      <div className="panel">
+        <div className="panel-body flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="stat-label !mb-1">Main wallet ({wallet.kind})</p>
+            <p className="mono text-sm font-semibold text-ink">{shortAddr(wallet.publicKey, 6)}</p>
+            <SolAmount sol={wallet.balanceSol} stack className="mt-0.5 text-[13px] text-ink-dim" />
+          </div>
+          <button onClick={wallet.disconnect} className="btn btn-sm shrink-0">
+            Disconnect
+          </button>
         </div>
-        <button
-          onClick={wallet.disconnect}
-          className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-800"
-        >
-          Disconnect
-        </button>
       </div>
     );
   }
 
   return (
-    <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
-      <p className="text-xs uppercase tracking-wide text-slate-500">Main wallet</p>
-      {!showOptions ? (
-        <button
-          onClick={() => setShowOptions(true)}
-          className="mt-2 w-full rounded-lg bg-gradient-to-r from-violet-500 to-fuchsia-500 px-4 py-2 text-sm font-semibold text-white hover:opacity-90"
-        >
-          Connect wallet
-        </button>
-      ) : (
-        <div className="mt-2 flex gap-2">
-          <button
-            onClick={() => wallet.connect("phantom")}
-            disabled={wallet.connecting}
-            className="flex-1 rounded-lg border border-slate-700 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-          >
-            Phantom
+    <div className="panel">
+      <div className="panel-body">
+        <p className="stat-label !mb-2">Main wallet</p>
+        {!showOptions ? (
+          <button onClick={() => setShowOptions(true)} className="btn btn-primary btn-block">
+            Connect wallet
           </button>
-          <button
-            onClick={() => wallet.connect("solflare")}
-            disabled={wallet.connecting}
-            className="flex-1 rounded-lg border border-slate-700 px-3 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-          >
-            Solflare
-          </button>
-        </div>
-      )}
-      {wallet.error && <p className="mt-2 text-xs text-rose-400">{wallet.error}</p>}
-      <p className="mt-2 text-[11px] text-slate-600">
-        Non-custodial — used only to fund/withdraw the trading wallet below. We never see your keys.
-      </p>
+        ) : (
+          <div className="flex gap-2">
+            <button onClick={() => wallet.connect("phantom")} disabled={wallet.connecting} className="btn flex-1">
+              Phantom
+            </button>
+            <button onClick={() => wallet.connect("solflare")} disabled={wallet.connecting} className="btn flex-1">
+              Solflare
+            </button>
+          </div>
+        )}
+        {wallet.error && <p className="neg mt-2 text-xs">{wallet.error}</p>}
+        <p className="mt-3 text-[11px] text-ink-mute">
+          Non-custodial — used only to fund/withdraw the trading wallet below. We never see your keys.
+        </p>
+      </div>
     </div>
   );
 }
