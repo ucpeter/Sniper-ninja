@@ -1,4 +1,4 @@
-importimport { loadDayLedger } from "@/lib/dayLedger";
+import { loadDayLedger } from "@/lib/dayLedger";
 
 export const dynamic = "force-dynamic";
 
@@ -19,4 +19,4 @@ export async function GET(req: Request) {
     console.error("[api/day-stats] failed", err);
     return Response.json({ error: "Could not load today's counters" }, { status: 500 });
   }
-}￼Enter
+}
