@@ -1,6 +1,8 @@
+import { sql } from "drizzle-orm";
 import {
   boolean,
   integer,
+  jsonb,
   numeric,
   pgTable,
   serial,
@@ -8,6 +10,7 @@ import {
   timestamp,
   unique,
 } from "drizzle-orm/pg-core";
+import type { AdvancedConfig, ExitPlan } from "@/lib/strategy";
 
 // One config row per connected (main) wallet address.
 export const botConfigs = pgTable("bot_configs", {
@@ -39,6 +42,9 @@ export const botConfigs = pgTable("bot_configs", {
   rugProtection: boolean("rug_protection").notNull().default(true),
   paperTrading: boolean("paper_trading").notNull().default(false),
 
+  // Partial sells, break-even, daily limits, extra filters, percent sizing (see lib/strategy.ts).
+  advanced: jsonb("advanced").$type<AdvancedConfig>().notNull().default(sql`'{}'::jsonb`),
+
   isRunning: boolean("is_running").notNull().default(false),
 
   createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -66,7 +72,7 @@ export const positions = pgTable("positions", {
   paperTrading: boolean("paper_trading").notNull().default(false),
 
   status: text("status").notNull().default("open"), // open | closed | failed
-  closeReason: text("close_reason"), // take_profit | stop_loss | trailing_stop | timeout | manual | failed
+  closeReason: text("close_reason"), // take_profit | stop_loss | break_even_stop | trailing_stop | timeout | manual | failed
 
   buyTxSignature: text("buy_tx_signature"),
   sellTxSignature: text("sell_tx_signature"),
@@ -74,6 +80,13 @@ export const positions = pgTable("positions", {
   exitPriceSol: numeric("exit_price_sol"),
   realizedPnlSol: numeric("realized_pnl_sol"),
   realizedPnlPct: numeric("realized_pnl_pct"),
+
+  // Partial sells: tokens still held, SOL received from partial sells so far,
+  // how many steps are done, and the exit plan frozen when the position opened.
+  remainingTokenAmount: numeric("remaining_token_amount"),
+  proceedsSoFarSol: numeric("proceeds_so_far_sol"),
+  partialStepsDone: integer("partial_steps_done").notNull().default(0),
+  exitPlan: jsonb("exit_plan").$type<ExitPlan>(),
 
   openedAt: timestamp("opened_at").notNull().defaultNow(),
   closedAt: timestamp("closed_at"),
