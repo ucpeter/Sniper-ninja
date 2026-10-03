@@ -19,6 +19,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
   if (body.exitPriceSol !== undefined) updates.exitPriceSol = String(body.exitPriceSol);
   if (body.realizedPnlSol !== undefined) updates.realizedPnlSol = String(body.realizedPnlSol);
   if (body.realizedPnlPct !== undefined) updates.realizedPnlPct = String(body.realizedPnlPct);
+  if (body.remainingTokenAmount !== undefined) updates.remainingTokenAmount = String(body.remainingTokenAmount);
+  if (body.proceedsSoFarSol !== undefined) updates.proceedsSoFarSol = String(body.proceedsSoFarSol);
+  if (body.partialStepsDone !== undefined) updates.partialStepsDone = Math.max(0, Math.floor(Number(body.partialStepsDone) || 0));
   if (body.status === "closed" || body.status === "failed") {
     updates.closedAt = new Date();
   }
